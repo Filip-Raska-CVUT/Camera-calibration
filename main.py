@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import math
 import cairosvg
 import os
 
@@ -96,6 +97,10 @@ def detect_corners_floodfill(png_folder):
         _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
 
         h, w = binary.shape
+
+        # TODO debug
+        wh = (w // 2, h // 2)
+
         mask = np.zeros((h+2, w+2), np.uint8)  # required by floodFill
 
         center_point = (w // 2, h // 2)
@@ -115,7 +120,8 @@ def detect_corners_floodfill(png_folder):
         result = orig.copy()
         ANGLE_THRESHOLD = 130
 
-        rel_corner_coord = []
+        # the corners are in no particular order set allows set difference to compare with the points generated from id
+        rel_corner_coord = set()
 
         for cnt in contours:
             eps = 0.01 * cv2.arcLength(cnt, True)
@@ -130,16 +136,81 @@ def detect_corners_floodfill(png_folder):
                 if ang < ANGLE_THRESHOLD:
                     cv2.circle(result, (px, py), 5, (0, 0, 255), -1)
 
-                    rel_corner_coord.append((w - px, h - py))
+                    # relative coordinates with respect to the marker center
+                    # x is to the left and y is up
+                    rel_corner_coord.add((px - center_point[0], center_point[1] - py))
 
+        # TODO debug
         if show_image:
+            """
             cv2.imshow("FloodFill center corners", result)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
+            """
             print(rel_corner_coord)
-            show_image = False
+
+            # test
+            return wh, result
+
+def polar_to_cartesian(r, theta, wh):
+    theta_rad = math.radians(theta)
+    x = math.ceil(r * math.cos(theta_rad)) + wh[0]
+    y = math.ceil(r * math.sin(theta_rad)) + wh[1]
+
+    return (x, y)
+
+def draw_whycode_marker(id, teethCount, r, wh, result):
+    points = set()
+    # for each tooth we need to make 2 smaller teeth
+    angle_step = 360 / teethCount / 2 
+
+    # converts id to binary
+    binary = format(id, '032b')[-teethCount:]
+    # binary = binary[-teethCount:]
+    print(binary)
+
+    # the current angle
+    theta = 0
+
+    # radiues adjuster
+    alpha = 0.6
+
+    for step in range(teethCount):
+        print(binary[step])
+
+        if binary[step] == '1':
+            p1 = polar_to_cartesian(r * alpha, theta, wh)
+            theta += angle_step
+            p2 = polar_to_cartesian(r * alpha, theta, wh)
+            p3 = polar_to_cartesian(r, theta, wh)
+            theta += angle_step
+            p4 = polar_to_cartesian(r, theta, wh)
+        else:
+            p1 = polar_to_cartesian(r, theta, wh)
+            theta += angle_step
+            p2 = polar_to_cartesian(r, theta, wh)
+            p3 = polar_to_cartesian(r * alpha, theta, wh)
+            theta += angle_step
+            p4 = polar_to_cartesian(r * alpha, theta, wh)
+
+        points.add(p1)
+        points.add(p2)
+        points.add(p3)
+        points.add(p4)
+
+        cv2.circle(result, (p1[0], p1[1]), 5, (100, 150, 0), -1)
+        cv2.circle(result, (p2[0], p2[1]), 5, (100, 150, 0), -1)
+        cv2.circle(result, (p3[0], p3[1]), 5, (100, 150, 0), -1)
+        cv2.circle(result, (p4[0], p4[1]), 5, (100, 150, 0), -1)
+
+    print(points)
+    cv2.imshow("FloodFill center corners", result)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    return points
 
 convert_svg_to_png('6bit', '6bit_png')
 # detect_corners_findContours('6bit_png')
-detect_corners_floodfill('6bit_png')
-
+wh, result = detect_corners_floodfill('6bit_png')
+draw_whycode_marker(62, 6, 180, wh, result)
