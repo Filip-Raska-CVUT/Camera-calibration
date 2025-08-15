@@ -3,6 +3,9 @@ import numpy as np
 import math
 import cairosvg
 import os
+from scipy.optimize import linear_sum_assignment
+# TODO
+import random
 
 def convert_svg_to_png(svg_folder, png_folder):
     os.makedirs(png_folder, exist_ok=True)
@@ -83,9 +86,11 @@ def detect_corners_findContours(png_folder):
             # show_image = False
 
 def detect_corners_floodfill(png_folder):
-    show_image = True
+    img_points = {}
+    marked_up_images = []
+    counter = 0
 
-    for file in os.listdir(png_folder):
+    for file in sorted(os.listdir(png_folder)):
         if not file.endswith('.png'):
             continue
 
@@ -98,14 +103,12 @@ def detect_corners_floodfill(png_folder):
 
         h, w = binary.shape
 
-        # TODO debug
-        wh = (w // 2, h // 2)
-
         mask = np.zeros((h+2, w+2), np.uint8)  # required by floodFill
 
         center_point = (w // 2, h // 2)
 
         # Make a copy so floodFill doesn’t overwrite original binary
+        # TODO is this neccessary?
         flood_filled = binary.copy()
 
         # Flood-fill from center
@@ -120,8 +123,10 @@ def detect_corners_floodfill(png_folder):
         result = orig.copy()
         ANGLE_THRESHOLD = 130
 
-        # the corners are in no particular order set allows set difference to compare with the points generated from id
-        rel_corner_coord = set()
+        # coordinates of the corner with respect to the center of the marker
+        # x is from left to right
+        # y is from bottom to top
+        relative_corner_coordinates = []
 
         for cnt in contours:
             eps = 0.01 * cv2.arcLength(cnt, True)
@@ -138,36 +143,31 @@ def detect_corners_floodfill(png_folder):
 
                     # relative coordinates with respect to the marker center
                     # x is to the left and y is up
-                    rel_corner_coord.add((px - center_point[0], center_point[1] - py))
+                    relative_corner_coordinates.append((px - center_point[0], center_point[1] - py))
 
-        # TODO debug
-        if show_image:
-            """
-            cv2.imshow("FloodFill center corners", result)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-            """
-            print(rel_corner_coord)
+        img_points[counter] = relative_corner_coordinates
+        marked_up_images.append(result)
+        counter += 1
 
-            # test
-            return wh, result
+    return marked_up_images, img_points
 
 def polar_to_cartesian(r, theta, wh):
     theta_rad = math.radians(theta)
     x = math.ceil(r * math.cos(theta_rad)) + wh[0]
-    y = math.ceil(r * math.sin(theta_rad)) + wh[1]
+    # normaly y goes from up to down we want it to go from down to up
+    y = -math.ceil(r * math.sin(theta_rad)) + wh[1]
 
     return (x, y)
 
 def draw_whycode_marker(id, teethCount, r, wh, result):
-    points = set()
+    points = []
     # for each tooth we need to make 2 smaller teeth
     angle_step = 360 / teethCount / 2 
 
     # converts id to binary
-    binary = format(id, '032b')[-teethCount:]
-    # binary = binary[-teethCount:]
-    print(binary)
+    binary = format(id, '032b')
+    # takes only the teeth count portion of binary
+    binary = binary[-teethCount:]
 
     # the current angle
     theta = 0
@@ -176,7 +176,6 @@ def draw_whycode_marker(id, teethCount, r, wh, result):
     alpha = 0.6
 
     for step in range(teethCount):
-        print(binary[step])
 
         if binary[step] == '1':
             p1 = polar_to_cartesian(r * alpha, theta, wh)
@@ -193,24 +192,87 @@ def draw_whycode_marker(id, teethCount, r, wh, result):
             theta += angle_step
             p4 = polar_to_cartesian(r * alpha, theta, wh)
 
-        points.add(p1)
-        points.add(p2)
-        points.add(p3)
-        points.add(p4)
+        # if the prev or next bit isn't the same we don't form a corner - the teeth connect
+        if binary[step] == binary[(step - 1) % teethCount]:
+            points.append(p1)
+            cv2.circle(result, (p1[0], p1[1]), 5, (100, 150, 0), -1)
 
-        cv2.circle(result, (p1[0], p1[1]), 5, (100, 150, 0), -1)
+        points.append(p2)
         cv2.circle(result, (p2[0], p2[1]), 5, (100, 150, 0), -1)
-        cv2.circle(result, (p3[0], p3[1]), 5, (100, 150, 0), -1)
-        cv2.circle(result, (p4[0], p4[1]), 5, (100, 150, 0), -1)
 
-    print(points)
+        points.append(p3)
+        cv2.circle(result, (p3[0], p3[1]), 5, (100, 150, 0), -1)
+
+        if binary[step] == binary[(step + 1) % teethCount]:
+            points.append(p4)
+            cv2.circle(result, (p4[0], p4[1]), 5, (100, 150, 0), -1)
+
+    """
     cv2.imshow("FloodFill center corners", result)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+    """
 
     return points
 
-convert_svg_to_png('6bit', '6bit_png')
-# detect_corners_findContours('6bit_png')
-wh, result = detect_corners_floodfill('6bit_png')
-draw_whycode_marker(62, 6, 180, wh, result)
+def _normalize_points(points):
+    """Flatten any nested structures into a clean Nx2 array."""
+    arr = np.array(points, dtype=float)
+    return arr.reshape(-1, 2)
+
+def match_marker_id (img_points, id_points):
+    # Hungarian algorithm
+
+    matched_results = {}
+
+    # Convert id_points to an ordered list of (id, points)
+    id_items = list(id_points.items())
+    id_ids = [k for k, _ in id_items]
+    id_coords = np.array([_normalize_points(v)[0] for _, v in id_items], dtype=float)
+
+    for img_id, detected in img_points.items():
+        detected_coords = np.array(detected, dtype=float)
+
+        # Build cost matrix (Euclidean distances)
+        cost_matrix = np.linalg.norm(
+            detected_coords[:, np.newaxis] - id_coords[np.newaxis, :],
+            axis=2
+        )
+
+        # Hungarian algorithm
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        # Reorder detected points to match id_points order
+        ordered_detected = [None] * len(id_coords)
+        for det_idx, id_idx in zip(row_ind, col_ind):
+            ordered_detected[id_idx] = detected_coords[det_idx]
+
+        matched_results[img_id] = {
+            # 'matched_points': ordered_detected,
+            'id_order': id_ids
+        }
+
+    return matched_results
+
+def main():
+    convert_svg_to_png('6bit', '6bit_png')
+
+    marked_up_images, img_points = detect_corners_floodfill('6bit_png')
+
+    ids = [62, 60, 58, 56, 52, 50, 48, 40, 32]
+    teethCount = 6
+    radius = 180
+
+    id_points = {}
+    wh = (378, 378)
+
+    random.shuffle(ids)
+    print(ids)
+
+    for i in range(len(ids)):
+        id_points[ids[i]] = draw_whycode_marker(ids[i], teethCount, radius, wh, marked_up_images[i])
+    
+
+    print(match_marker_id(img_points, id_points))
+
+main()
